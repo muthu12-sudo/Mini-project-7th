@@ -1,0 +1,94 @@
+import torch
+import cv2
+import pandas as pd
+import streamlit as st
+from pathlib import Path
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor
+import tempfile
+import os
+
+# Streamlit App
+st.title("Pavement Crack Detection")
+st.write("Upload images or videos, detect cracks, and save results to GIS.")
+
+# Load the Trained Model
+MODEL_PATH = "pavement-cracks-model-resnet101.pth"  # Path to your model
+model = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+model.eval()  # Set the model to evaluation mode
+
+# Initialize GIS
+api_key = "your-api-key"  # Replace with your API key
+gis = GIS(api_key=api_key)
+
+# Helper Function: Run Inference on Image
+def predict_image(image_path, model):
+    image = cv2.imread(image_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    transform = torch.nn.functional.interpolate
+    # Add preprocessing as per your training pipeline (resize, normalize, etc.)
+    input_tensor = torch.tensor(image).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+    predictions = model(input_tensor)  # Run inference
+    return predictions
+
+# Image Upload and Prediction
+uploaded_image = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "png"])
+if uploaded_image:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        tmp_file.write(uploaded_image.read())
+        image_path = tmp_file.name
+
+    st.image(image_path, caption="Uploaded Image", use_column_width=True)
+
+    # Predict cracks
+    st.write("Running inference...")
+    predictions = predict_image(image_path, model)
+
+    # Visualize results (you can replace this with your own bounding box visualization logic)
+    st.write("Predictions:", predictions)
+
+    # Save results to GIS
+    st.write("Saving results to GIS...")
+    detections = []  # Replace this with extracted bounding box coordinates from predictions
+    for box in predictions:  # This loop should process your model's predictions
+        detections.append({"X": box[0], "Y": box[1], "Class": "Crack"})
+
+    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
+    cracks_layer = gis.content.import_data(sdf, title="Image Crack Detections")
+    st.success("Results uploaded to GIS successfully!")
+    st.write(cracks_layer)
+
+# Video Upload and Prediction
+uploaded_video = st.file_uploader("Upload a video (mp4/avi)", type=["mp4", "avi"])
+if uploaded_video:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        tmp_file.write(uploaded_video.read())
+        video_path = tmp_file.name
+
+    st.video(video_path)
+
+    # Process video frame by frame
+    st.write("Processing video for crack detection...")
+    cap = cv2.VideoCapture(video_path)
+    frame_detections = []
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # Run inference on each frame
+        predictions = predict_image(frame, model)
+        frame_detections.append(predictions)
+
+    cap.release()
+
+    # Save video detections to GIS
+    st.write("Saving video results to GIS...")
+    detections = []  # Replace this with bounding box coordinates from video predictions
+    for frame_pred in frame_detections:
+        for box in frame_pred:
+            detections.append({"X": box[0], "Y": box[1], "Class": "Crack"})
+
+    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
+    video_layer = gis.content.import_data(sdf, title="Video Crack Detections")
+    st.success("Video results uploaded to GIS successfully!")
+    st.write(video_layer)
