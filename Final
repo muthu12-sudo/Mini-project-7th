@@ -1,0 +1,85 @@
+import streamlit as st
+import torch
+import os
+import cv2
+import pandas as pd
+from pathlib import Path
+from arcgis.gis import GIS
+from arcgis.learn import prepare_data, SingleShotDetector
+from arcgis.features import GeoAccessor
+
+# Initialize GIS
+api_key = 'YOUR_API_KEY'
+gis = GIS(api_key=api_key)
+
+# Function to load trained model
+def load_model(model_path):
+    # Load the trained model from .pth file
+    model = torch.load(model_path)
+    model.eval()
+    return model
+
+# Function for image inference
+def predict_image(model, image_path, threshold=0.2):
+    img = cv2.imread(image_path)
+    # Apply the model to make predictions (you may need to customize based on your model)
+    bbox_data = model.predict(image_path, threshold=threshold, visualize=True)
+    return bbox_data
+
+# Function for video inference
+def predict_video(model, video_path, metadata_file, threshold=0.2):
+    model.predict_video(input_video_path=video_path,
+                        metadata_file=metadata_file,
+                        visualize=True,
+                        resize=True)
+
+# Streamlit user interface
+def main():
+    st.title("Pavement Crack Detection")
+
+    # File uploader for image and video
+    uploaded_image = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+    uploaded_video = st.file_uploader("Upload Video", type=["mp4"])
+
+    # Load the model (replace with your model path)
+    model_path = 'path_to_your_model/pavement-cracks-model-resnet101.pth'
+    model = load_model(model_path)
+
+    if uploaded_image:
+        # Save the uploaded image temporarily
+        img_path = Path("temp_image.jpg")
+        with open(img_path, "wb") as f:
+            f.write(uploaded_image.getbuffer())
+        
+        st.image(img_path, caption="Uploaded Image", use_column_width=True)
+
+        # Predict using the trained model
+        bbox_data = predict_image(model, img_path)
+        st.image(bbox_data[0], caption="Predicted Image", use_column_width=True)
+    
+    if uploaded_video:
+        # Save the uploaded video temporarily
+        video_path = Path("temp_video.mp4")
+        with open(video_path, "wb") as f:
+            f.write(uploaded_video.getbuffer())
+        
+        st.video(video_path)
+
+        # Create metadata file for video predictions
+        metadata_file = 'metadata.csv'
+        predict_video(model, video_path, metadata_file)
+
+        # Read metadata and display it
+        df = pd.read_csv(metadata_file)
+        st.write(df)
+
+        # Publish results to GIS
+        df['Sensor Longitude'] = df['Sensor Longitude'].astype(float)
+        df['Sensor Latitude'] = df['Sensor Latitude'].astype(float)
+        sdf = GeoAccessor.from_xy(df, 'Sensor Longitude', 'Sensor Latitude')
+
+        cracks_lyr = gis.content.import_data(sdf, title="Crack Points")
+        st.map(sdf)  # Visualize crack locations on the map
+
+if __name__ == "__main__":
+    main()
