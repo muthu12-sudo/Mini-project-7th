@@ -1,80 +1,63 @@
-import os
-import zipfile
-import pandas as pd
-from pathlib import Path
-from arcgis.gis import GIS
-from arcgis.features import GeoAccessor
-from arcgis.learn import SingleShotDetector
-from fastai.vision.all import *
+import torch
+from torchvision import models, transforms
+from PIL import Image
+import matplotlib.pyplot as plt
 
-# Set up your API key and GIS connection
-api_key = 'YOUR_API_KEY'  # Replace with your API key
-gis = GIS(api_key=api_key)
+# Function to load and preprocess the image
+def process_image(image_path):
+    # Define the transformation for the image
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Resize the image to match model input
+        transforms.ToTensor(),          # Convert image to tensor
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize
+    ])
 
-# Define paths
-model_path = 'path_to_saved_model.pth'  # Replace with the actual path to your saved model
-data_path = 'path_to_data'  # Replace with the path where your data is stored
+    # Open the image
+    img = Image.open(image_path)
 
-# Load the saved model
-data = prepare_data(data_path, batch_size=8, chip_size=500, seed=42, dataset_type='PASCAL_VOC_rectangles')
-ssd = SingleShotDetector.load(model_path, data)
+    # Apply transformations to the image
+    img_tensor = transform(img).unsqueeze(0)  # Add batch dimension (1, C, H, W)
+    return img_tensor
 
-# Function to predict and visualize results on image
-def predict_image(img_path, model):
-    bbox_data = model.predict(img_path, threshold=0.1, visualize=True)
-    return bbox_data
+# Load the pretrained ResNet50 model
+def load_model():
+    model = models.resnet50(pretrained=True)
+    model.eval()  # Set the model to evaluation mode
+    return model
 
-# Function to predict and visualize results on video
-def predict_video(video_path, model, metadata_file):
-    model.predict_video(input_video_path=video_path, metadata_file=metadata_file, visualize=True, resize=True)
+# Perform inference on the image using the loaded model
+def predict(model, img_tensor):
+    with torch.no_grad():  # No gradient calculation needed during inference
+        outputs = model(img_tensor)
 
-# Accept image and video file paths from the user
-img_file = input("Enter the path to the image file: ")  # Example: 'test_img.jpg'
-video_file = input("Enter the path to the video file: ")  # Example: 'test_video.mp4'
-metadata_file = 'metadata.csv'  # Path to the metadata file associated with the video
+    # Get the predicted class index
+    _, predicted_class = torch.max(outputs, 1)
+    return predicted_class.item()
 
-# Predict on the image
-predict_image(img_file, ssd)
+# Display the image and the predicted class
+def display_result(image_path, predicted_class_idx):
+    # Load and display the image
+    img = Image.open(image_path)
+    plt.imshow(img)
+    plt.title(f'Predicted Class Index: {predicted_class_idx}')
+    plt.show()
 
-# Predict on the video
-predict_video(video_file, ssd, metadata_file)
+# Main function to load model, process image, and make predictions
+def main(image_path):
+    # Load the model
+    model = load_model()
 
-# Publish results to GIS (for video detections)
-df = pd.read_csv(metadata_file)
+    # Process the image
+    img_tensor = process_image(image_path)
 
-# Handle NAN and '\n' values
-df.vmtilocaldataset = df.vmtilocaldataset.str.strip()
-df.loc[df.vmtilocaldataset == '', 'vmtilocaldataset'] = ''
-df['count'] = (df['vmtilocaldataset'].str.split(';').str.len().fillna(1) - 1)
+    # Perform prediction
+    predicted_class_idx = predict(model, img_tensor)
 
-# Grouping by frame and getting max detections per group
-fps = 60
-a = (pd.Series(df.index.values) / fps)
-a = (a - .49).round().abs()
-df['group'] = a
+    # Display the result
+    display_result(image_path, predicted_class_idx)
 
-# Get index of row with max detections in each group
-max_detection_idxes = df[['group', 'count']].groupby('group').idxmax()['count'].values
+# Provide the image path
+image_path = 'path/to/your/image.jpg'  # Replace with the path to your image
 
-# Extract rows for the indexes
-df_flt = df.iloc[max_detection_idxes]
-df_flt.drop(df_flt.loc[df['count'] == 0].index, inplace=True)
-
-# Create spatial data frame for GIS
-sdf = GeoAccessor.from_xy(df_flt, 'Sensor Longitude', 'Sensor Latitude')
-
-# Publish the result as a layer in GIS
-cracks_lyr = gis.content.import_data(sdf, title='pavement_crack_points')
-
-# Visualize the GIS map
-m1 = gis.map('Haryana, India')  # Set the desired location
-m1.basemap.basemap = "satellite"  # Set the basemap
-m1.content.add(cracks_lyr)  # Add the layer with detected cracks
-
-# Apply a renderer to visualize the results
-rend_manager = m1.content.renderer(0)
-smm = rend_manager.smart_mapping()
-smm.class_breaks_renderer(break_type="size", field="count_")
-
-# Display the map
-m
+# Run the main function
+main(image_path)
