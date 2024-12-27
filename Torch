@@ -1,9 +1,11 @@
 import torch
-import torchvision.transforms as transforms
+from torchvision import transforms
+from torchvision.models import resnet101
 from PIL import Image
 import cv2
 import pandas as pd
 import streamlit as st
+from collections import OrderedDict
 from arcgis.gis import GIS
 from arcgis.features import GeoAccessor
 import tempfile
@@ -13,29 +15,43 @@ import os
 st.title("Pavement Crack Detection")
 st.write("Upload images or videos, detect cracks, and save results to GIS.")
 
-# Define Model Architecture (Replace this with your architecture used during training)
+# Define Model Architecture
 class CustomModel(torch.nn.Module):
     def __init__(self, num_classes):
         super(CustomModel, self).__init__()
-        self.base_model = torch.hub.load('pytorch/vision', 'resnet101', pretrained=False)
-        self.base_model.fc = torch.nn.Linear(2048, num_classes)  # Adjust for your output classes
+        self.base_model = resnet101(pretrained=False)
+        self.base_model.fc = torch.nn.Linear(2048, num_classes)
 
     def forward(self, x):
         return self.base_model(x)
 
 # Load Model
-num_classes = 2  # Adjust based on your dataset
+MODEL_PATH = "pavement-cracks-model-resnet101.pth"  # Update with your model path
+num_classes = 2  # Update based on your dataset
 model = CustomModel(num_classes=num_classes)
 
-MODEL_PATH = "pavement-cracks-model-resnet101.pth"  # Path to your model file
-model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
-model.eval()  # Set model to evaluation mode
+try:
+    state_dict = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+
+    # Remove 'module.' prefix if necessary
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k.replace("module.", "")  # Adjust key name if needed
+        new_state_dict[name] = v
+
+    # Load adjusted state_dict
+    model.load_state_dict(new_state_dict)
+    model.eval()  # Set model to evaluation mode
+    st.success("Model loaded successfully!")
+except RuntimeError as e:
+    st.error(f"Error loading model: {e}")
+    st.stop()
 
 # Initialize GIS
 api_key = "your-api-key"  # Replace with your GIS API key
 gis = GIS(api_key=api_key)
 
-# Preprocessing Function (Modify based on your training pipeline)
+# Preprocessing Function
 def preprocess_image(image_path):
     image = Image.open(image_path).convert("RGB")
     transform = transforms.Compose([
