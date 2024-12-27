@@ -1,130 +1,118 @@
 import torch
-from torchvision import transforms
-from torchvision.models import resnet101
-from PIL import Image
 import cv2
-import pandas as pd
+import numpy as np
 import streamlit as st
+from torchvision import transforms
+from PIL import Image
 from collections import OrderedDict
-from arcgis.gis import GIS
-from arcgis.features import GeoAccessor
-import tempfile
-import os
 
-# Streamlit App
-st.title("Pavement Crack Detection")
-st.write("Upload images or videos, detect cracks, and save results to GIS.")
+# Streamlit app title and description
+st.title("Custom Model Inference App")
+st.write("Upload an image or video to run inference using your custom PyTorch model.")
 
-# Define Model Architecture
-class CustomModel(torch.nn.Module):
-    def __init__(self, num_classes):
-        super(CustomModel, self).__init__()
-        self.base_model = resnet101(pretrained=False)
-        self.base_model.fc = torch.nn.Linear(2048, num_classes)
+# Function to load a custom model
+@st.cache_resource
+def load_custom_model(model_path, num_classes):
+    """
+    Loads a custom PyTorch model for inference.
+    """
+    class CustomModel(torch.nn.Module):
+        def __init__(self, num_classes):
+            super(CustomModel, self).__init__()
+            from torchvision.models import resnet101  # Replace with your backbone
+            self.base_model = resnet101(pretrained=False)
+            self.base_model.fc = torch.nn.Linear(2048, num_classes)
 
-    def forward(self, x):
-        return self.base_model(x)
+        def forward(self, x):
+            return self.base_model(x)
 
-# Load Model
-MODEL_PATH = "pavement-cracks-model-resnet101.pth"  # Update with your model path
-num_classes = 2  # Update based on your dataset
-model = CustomModel(num_classes=num_classes)
+    model = CustomModel(num_classes=num_classes)
+    state_dict = torch.load(model_path, map_location=torch.device("cpu"))
 
-try:
-    state_dict = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
-
-    # Remove 'module.' prefix if necessary
+    # Fix keys if necessary
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        name = k.replace("module.", "")  # Adjust key name if needed
+        name = k.replace("module.", "")  # Remove 'module.' prefix if present
         new_state_dict[name] = v
 
-    # Load adjusted state_dict
-    model.load_state_dict(new_state_dict)
-    model.eval()  # Set model to evaluation mode
-    st.success("Model loaded successfully!")
-except RuntimeError as e:
-    st.error(f"Error loading model: {e}")
-    st.stop()
+    model.load_state_dict(new_state_dict, strict=False)
+    model.eval()  # Set to evaluation mode
+    return model
 
-# Initialize GIS
-api_key = "your-api-key"  # Replace with your GIS API key
-gis = GIS(api_key=api_key)
 
-# Preprocessing Function
-def preprocess_image(image_path):
-    image = Image.open(image_path).convert("RGB")
+# Initialize model
+MODEL_PATH = "model.pth"  # Path to your .pth model
+NUM_CLASSES = 2  # Number of output classes (update accordingly)
+model = load_custom_model(MODEL_PATH, NUM_CLASSES)
+st.success("Model loaded successfully!")
+
+
+# Function to preprocess image
+def preprocess_image(image):
+    """
+    Preprocesses an image for model inference.
+    """
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Adjust size if needed
+        transforms.Resize((224, 224)),  # Resize to match input size
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     return transform(image).unsqueeze(0)  # Add batch dimension
 
-# Inference Function
-def predict_image(image_path, model):
-    input_tensor = preprocess_image(image_path)
-    with torch.no_grad():
-        predictions = model(input_tensor)
-    return predictions
 
-# Image Upload and Prediction
+# Function to predict on an image
+def predict_image(image, model):
+    """
+    Runs inference on a single image.
+    """
+    input_tensor = preprocess_image(image)
+    with torch.no_grad():
+        outputs = model(input_tensor)
+        probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
+    return probabilities
+
+
+# Upload and process an image
 uploaded_image = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "png"])
 if uploaded_image:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
-        tmp_file.write(uploaded_image.read())
-        image_path = tmp_file.name
+    image = Image.open(uploaded_image).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    st.image(image_path, caption="Uploaded Image", use_column_width=True)
-
-    # Predict cracks
+    # Run inference
     st.write("Running inference...")
-    predictions = predict_image(image_path, model)
+    probabilities = predict_image(image, model)
+    st.write("Predictions (class probabilities):", probabilities.numpy())
 
-    # Process model output (update based on your model's output format)
-    st.write("Predictions (raw):", predictions)
-
-    # Save results to GIS
-    st.write("Saving results to GIS...")
-    detections = []  # Replace this with bounding box data if available
-    detections.append({"X": 76.987, "Y": 28.704, "Class": "Crack"})  # Example
-
-    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
-    cracks_layer = gis.content.import_data(sdf, title="Image Crack Detections")
-    st.success("Results uploaded to GIS successfully!")
-    st.write(cracks_layer)
-
-# Video Upload and Prediction
+# Upload and process a video
 uploaded_video = st.file_uploader("Upload a video (mp4/avi)", type=["mp4", "avi"])
 if uploaded_video:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
-        tmp_file.write(uploaded_video.read())
-        video_path = tmp_file.name
+    # Save uploaded video to a temporary path
+    temp_video_path = "temp_video.mp4"
+    with open(temp_video_path, "wb") as f:
+        f.write(uploaded_video.read())
 
-    st.video(video_path)
+    st.video(temp_video_path)
+    st.write("Running video inference...")
 
-    # Process video frame by frame
-    st.write("Processing video for crack detection...")
-    cap = cv2.VideoCapture(video_path)
-    frame_detections = []
+    # Open video with OpenCV
+    cap = cv2.VideoCapture(temp_video_path)
+    frame_count = 0
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-        # Save frame as temporary image and predict
-        temp_image_path = "temp_frame.jpg"
-        cv2.imwrite(temp_image_path, frame)
-        predictions = predict_image(temp_image_path, model)
-        frame_detections.append(predictions)
+
+        # Process frame
+        frame_count += 1
+        frame_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        probabilities = predict_image(frame_image, model)
+
+        # Display inference results
+        st.write(f"Frame {frame_count}: Predictions (class probabilities):", probabilities.numpy())
 
     cap.release()
+    st.success("Video inference completed!")
 
-    # Save video detections to GIS
-    st.write("Saving video results to GIS...")
-    detections = []  # Update with bounding box data from video predictions
-    detections.append({"X": 76.987, "Y": 28.704, "Class": "Crack"})  # Example
-
-    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
-    video_layer = gis.content.import_data(sdf, title="Video Crack Detections")
-    st.success("Video results uploaded to GIS successfully!")
-    st.write(video_layer)
+# Conclusion
+st.write("This app uses your custom PyTorch model for inference on images and videos.")
