@@ -1,85 +1,128 @@
 import streamlit as st
-import torch
 import os
-import cv2
-import pandas as pd
+import zipfile
 from pathlib import Path
 from arcgis.gis import GIS
-from arcgis.learn import prepare_data, SingleShotDetector
 from arcgis.features import GeoAccessor
+from fastai.vision.all import *
+import cv2
+import pandas as pd
+import numpy as np
 
 # Initialize GIS
 api_key = 'YOUR_API_KEY'
 gis = GIS(api_key=api_key)
 
-# Function to load trained model
+# Load trained model
 def load_model(model_path):
-    # Load the trained model from .pth file
-    model = torch.load(model_path)
-    model.eval()
-    return model
+    learn = load_learner(model_path)
+    return learn
 
-# Function for image inference
-def predict_image(model, image_path, threshold=0.2):
-    img = cv2.imread(image_path)
-    # Apply the model to make predictions (you may need to customize based on your model)
-    bbox_data = model.predict(image_path, threshold=threshold, visualize=True)
-    return bbox_data
+# Predict on image
+def predict_image(model, img_path):
+    img = PILImage.create(img_path)
+    return model.predict(img)
 
-# Function for video inference
-def predict_video(model, video_path, metadata_file, threshold=0.2):
-    model.predict_video(input_video_path=video_path,
-                        metadata_file=metadata_file,
-                        visualize=True,
-                        resize=True)
-
-# Streamlit user interface
-def main():
-    st.title("Pavement Crack Detection")
-
-    # File uploader for image and video
-    uploaded_image = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
-    uploaded_video = st.file_uploader("Upload Video", type=["mp4"])
-
-    # Load the model (replace with your model path)
-    model_path = 'path_to_your_model/pavement-cracks-model-resnet101.pth'
-    model = load_model(model_path)
-
-    if uploaded_image:
-        # Save the uploaded image temporarily
-        img_path = Path("temp_image.jpg")
-        with open(img_path, "wb") as f:
-            f.write(uploaded_image.getbuffer())
-        
-        st.image(img_path, caption="Uploaded Image", use_column_width=True)
-
-        # Predict using the trained model
-        bbox_data = predict_image(model, img_path)
-        st.image(bbox_data[0], caption="Predicted Image", use_column_width=True)
+# Predict on video
+def predict_video(model, video_path, metadata_path):
+    cap = cv2.VideoCapture(video_path)
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    if uploaded_video:
-        # Save the uploaded video temporarily
-        video_path = Path("temp_video.mp4")
-        with open(video_path, "wb") as f:
-            f.write(uploaded_video.getbuffer())
+    metadata = []
+    
+    for i in range(frame_count):
+        ret, frame = cap.read()
+        if not ret:
+            break
         
-        st.video(video_path)
+        # Convert frame to PILImage
+        frame_img = PILImage.create(frame)
+        
+        # Predict
+        pred_class, pred_idx, outputs = model.predict(frame_img)
+        
+        # Store predictions
+        metadata.append({
+            'frame': i,
+            'prediction': pred_class,
+            'confidence': outputs[pred_idx].item()
+        })
+        
+    # Save metadata to CSV
+    df = pd.DataFrame(metadata)
+    df.to_csv(metadata_path, index=False)
+    cap.release()
+    return df
 
-        # Create metadata file for video predictions
-        metadata_file = 'metadata.csv'
-        predict_video(model, video_path, metadata_file)
+# Publish results to GIS
+def publish_to_gis(metadata_file):
+    df = pd.read_csv(metadata_file)
+    
+    # Handle missing or invalid metadata
+    df['count'] = df['prediction'].apply(lambda x: 1 if x != 'None' else 0)
+    
+    # Filter non-detection frames
+    df_flt = df[df['count'] > 0]
+    
+    # Create GeoDataFrame
+    sdf = GeoAccessor.from_xy(df_flt, 'longitude', 'latitude')  # Adjust columns if needed
+    
+    # Create GIS Layer
+    cracks_layer = gis.content.import_data(sdf, title='Pavement Cracks')
+    
+    # Return GIS layer object
+    return cracks_layer
 
-        # Read metadata and display it
-        df = pd.read_csv(metadata_file)
-        st.write(df)
+# Streamlit UI
+st.title('Pavement Crack Detection')
 
-        # Publish results to GIS
-        df['Sensor Longitude'] = df['Sensor Longitude'].astype(float)
-        df['Sensor Latitude'] = df['Sensor Latitude'].astype(float)
-        sdf = GeoAccessor.from_xy(df, 'Sensor Longitude', 'Sensor Latitude')
+# User inputs: Upload image and video files
+img_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png"])
+video_file = st.file_uploader("Upload a Video", type=["mp4", "avi"])
 
-        cracks_lyr = gis.content.import_data(sdf, title="Crack Points")
-        st.map(sdf)  # Visualize crack locations on the map
+# Upload model .pth file
+model_file = st.file_uploader("Upload the Model", type=["pth"])
 
-if __name__ == "__main__":
-    main()
+# Process files if they are uploaded
+if model_file and img_file and video_file:
+    # Save uploaded model and load it
+    model_path = Path("model.pth")
+    with open(model_path, "wb") as f:
+        f.write(model_file.read())
+    
+    model = load_model(model_path)
+    
+    # Save uploaded image and video
+    img_path = Path("uploaded_img.jpg")
+    with open(img_path, "wb") as f:
+        f.write(img_file.read())
+    
+    video_path = Path("uploaded_video.mp4")
+    with open(video_path, "wb") as f:
+        f.write(video_file.read())
+    
+    # Predict on image
+    img_pred_class, img_pred_idx, img_outputs = predict_image(model, img_path)
+    
+    # Display predicted image
+    st.image(img_path, caption='Uploaded Image', use_column_width=True)
+    st.write(f"Prediction: {img_pred_class}, Confidence: {img_outputs[img_pred_idx]:.4f}")
+    
+    # Predict on video
+    metadata_path = Path("video_metadata.csv")
+    video_df = predict_video(model, video_path, metadata_path)
+    
+    # Display results from video metadata
+    st.write("Video Metadata:")
+    st.dataframe(video_df)
+    
+    # Publish to GIS
+    cracks_layer = publish_to_gis(metadata_path)
+    
+    # Display the GIS layer
+    st.write("Results Published to GIS:")
+    st.write(cracks_layer)
+
+else:
+    st.warning("Please upload the image, video, and model file to continue.")
