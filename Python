@@ -1,0 +1,83 @@
+import streamlit as st
+from arcgis.learn import SingleShotDetector
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor
+from PIL import Image
+import cv2
+import tempfile
+import os
+import pandas as pd
+
+# Load GIS
+@st.cache_resource
+def connect_gis(api_key):
+    return GIS(api_key=api_key)
+
+# Load the trained model
+@st.cache_resource
+def load_model(model_path):
+    return SingleShotDetector.from_model_path(model_path)
+
+# Initialize GIS and Model
+api_key = "your-api-key"  # Replace with your actual ArcGIS API key
+gis = connect_gis(api_key)
+model_path = "path/to/your/saved/model"  # Replace with the path to your trained model
+ssd = load_model(model_path)
+
+# Streamlit UI
+st.title("Pavement Crack Detection with GIS")
+st.write("Upload an image or video to detect cracks, and automatically save the results to your GIS.")
+
+# Image Upload and Prediction
+st.subheader("Upload an Image")
+uploaded_image = st.file_uploader("Choose an image file", type=["jpg", "jpeg", "png"])
+if uploaded_image:
+    image = Image.open(uploaded_image).convert("RGB")
+    st.image(image, caption="Uploaded Image", use_column_width=True)
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        image.save(tmp_file.name)
+        bbox_data = ssd.predict(tmp_file.name, threshold=0.2, visualize=True)
+        st.image(bbox_data, caption="Detected Cracks", use_column_width=True)
+        
+        # Save results to GIS
+        st.write("Saving results to GIS...")
+        sdf = GeoAccessor.from_xy(pd.DataFrame({
+            "X": [100.1],  # Placeholder longitude (replace with your data)
+            "Y": [50.1],   # Placeholder latitude (replace with your data)
+            "Class": ["Crack"]
+        }), "X", "Y")
+        cracks_layer = gis.content.import_data(sdf, title="Image Crack Detections")
+        st.success("Image results uploaded to GIS successfully!")
+        st.write(cracks_layer)
+
+# Video Upload and Prediction
+st.subheader("Upload a Video")
+uploaded_video = st.file_uploader("Choose a video file", type=["mp4", "avi", "mov"])
+if uploaded_video:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        tmp_file.write(uploaded_video.read())
+        video_path = tmp_file.name
+    
+    # Output path for the prediction result
+    output_video_path = os.path.join(tempfile.gettempdir(), "output.mp4")
+    
+    # Process video with the model
+    with st.spinner("Processing Video..."):
+        ssd.predict_video(input_video_path=video_path, 
+                          output_video_path=output_video_path, 
+                          metadata_file="metadata.csv",
+                          threshold=0.2, 
+                          visualize=True)
+    
+    st.success("Video Processed Successfully!")
+    st.video(output_video_path)
+
+    # Process metadata and upload to GIS
+    st.write("Saving video results to GIS...")
+    df = pd.read_csv("metadata.csv")
+    df['count'] = df['vmtilocaldataset'].str.split(';').str.len().fillna(1) - 1
+    sdf = GeoAccessor.from_xy(df, "Sensor Longitude", "Sensor Latitude")
+    video_layer = gis.content.import_data(sdf, title="Video Crack Detections")
+    st.success("Video results uploaded to GIS successfully!")
+    st.write(video_layer)
