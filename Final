@@ -1,126 +1,80 @@
-import streamlit as st
 import os
 import zipfile
+import pandas as pd
 from pathlib import Path
 from arcgis.gis import GIS
 from arcgis.features import GeoAccessor
+from arcgis.learn import SingleShotDetector
 from fastai.vision.all import *
-import cv2
-import pandas as pd
-import numpy as np
 
-# Initialize GIS
-api_key = 'YOUR_API_KEY'
+# Set up your API key and GIS connection
+api_key = 'YOUR_API_KEY'  # Replace with your API key
 gis = GIS(api_key=api_key)
 
-# Function to load the trained model
-def load_model(model_path):
-    learn = load_learner(model_path)
-    return learn
+# Define paths
+model_path = 'path_to_saved_model.pth'  # Replace with the actual path to your saved model
+data_path = 'path_to_data'  # Replace with the path where your data is stored
 
-# Function to predict on image
-def predict_image(model, img_path):
-    img = PILImage.create(img_path)
-    return model.predict(img)
+# Load the saved model
+data = prepare_data(data_path, batch_size=8, chip_size=500, seed=42, dataset_type='PASCAL_VOC_rectangles')
+ssd = SingleShotDetector.load(model_path, data)
 
-# Function to predict on video
-def predict_video(model, video_path, metadata_path):
-    cap = cv2.VideoCapture(video_path)
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    
-    metadata = []
-    
-    for i in range(frame_count):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # Convert frame to PILImage
-        frame_img = PILImage.create(frame)
-        
-        # Predict
-        pred_class, pred_idx, outputs = model.predict(frame_img)
-        
-        # Store predictions
-        metadata.append({
-            'frame': i,
-            'prediction': pred_class,
-            'confidence': outputs[pred_idx].item()
-        })
-        
-    # Save metadata to CSV
-    df = pd.DataFrame(metadata)
-    df.to_csv(metadata_path, index=False)
-    cap.release()
-    return df
+# Function to predict and visualize results on image
+def predict_image(img_path, model):
+    bbox_data = model.predict(img_path, threshold=0.1, visualize=True)
+    return bbox_data
 
-# Function to publish results to GIS
-def publish_to_gis(metadata_file):
-    df = pd.read_csv(metadata_file)
-    
-    # Handle missing or invalid metadata
-    df['count'] = df['prediction'].apply(lambda x: 1 if x != 'None' else 0)
-    
-    # Filter non-detection frames
-    df_flt = df[df['count'] > 0]
-    
-    # Create GeoDataFrame
-    sdf = GeoAccessor.from_xy(df_flt, 'longitude', 'latitude')  # Adjust columns if needed
-    
-    # Create GIS Layer
-    cracks_layer = gis.content.import_data(sdf, title='Pavement Cracks')
-    
-    # Return GIS layer object
-    return cracks_layer
+# Function to predict and visualize results on video
+def predict_video(video_path, model, metadata_file):
+    model.predict_video(input_video_path=video_path, metadata_file=metadata_file, visualize=True, resize=True)
 
-# Streamlit User Interface
-st.title('Pavement Crack Detection')
+# Accept image and video file paths from the user
+img_file = input("Enter the path to the image file: ")  # Example: 'test_img.jpg'
+video_file = input("Enter the path to the video file: ")  # Example: 'test_video.mp4'
+metadata_file = 'metadata.csv'  # Path to the metadata file associated with the video
 
-# User inputs: Upload image, video, and model files
-img_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png"])
-video_file = st.file_uploader("Upload a Video", type=["mp4", "avi"])
-model_file = st.file_uploader("Upload the Model", type=["pth"])
+# Predict on the image
+predict_image(img_file, ssd)
 
-# Process files if they are uploaded
-if model_file and img_file and video_file:
-    # Save uploaded model and load it
-    model_path = Path("model.pth")
-    with open(model_path, "wb") as f:
-        f.write(model_file.read())
-    
-    model = load_model(model_path)
-    
-    # Save uploaded image and video
-    img_path = Path("uploaded_img.jpg")
-    with open(img_path, "wb") as f:
-        f.write(img_file.read())
-    
-    video_path = Path("uploaded_video.mp4")
-    with open(video_path, "wb") as f:
-        f.write(video_file.read())
-    
-    # Predict on image
-    img_pred_class, img_pred_idx, img_outputs = predict_image(model, img_path)
-    
-    # Display predicted image
-    st.image(img_path, caption='Uploaded Image', use_column_width=True)
-    st.write(f"Prediction: {img_pred_class}, Confidence: {img_outputs[img_pred_idx]:.4f}")
-    
-    # Predict on video
-    metadata_path = Path("video_metadata.csv")
-    video_df = predict_video(model, video_path, metadata_path)
-    
-    # Display results from video metadata
-    st.write("Video Metadata:")
-    st.dataframe(video_df)
-    
-    # Publish to GIS
-    cracks_layer = publish_to_gis(metadata_path)
-    
-    # Display the GIS layer
-    st.write("Results Published to GIS:")
-    st.write(cracks_layer)
+# Predict on the video
+predict_video(video_file, ssd, metadata_file)
 
-else:
-    st.warning("Please upload the image, video, and model file to continue.")
+# Publish results to GIS (for video detections)
+df = pd.read_csv(metadata_file)
+
+# Handle NAN and '\n' values
+df.vmtilocaldataset = df.vmtilocaldataset.str.strip()
+df.loc[df.vmtilocaldataset == '', 'vmtilocaldataset'] = ''
+df['count'] = (df['vmtilocaldataset'].str.split(';').str.len().fillna(1) - 1)
+
+# Grouping by frame and getting max detections per group
+fps = 60
+a = (pd.Series(df.index.values) / fps)
+a = (a - .49).round().abs()
+df['group'] = a
+
+# Get index of row with max detections in each group
+max_detection_idxes = df[['group', 'count']].groupby('group').idxmax()['count'].values
+
+# Extract rows for the indexes
+df_flt = df.iloc[max_detection_idxes]
+df_flt.drop(df_flt.loc[df['count'] == 0].index, inplace=True)
+
+# Create spatial data frame for GIS
+sdf = GeoAccessor.from_xy(df_flt, 'Sensor Longitude', 'Sensor Latitude')
+
+# Publish the result as a layer in GIS
+cracks_lyr = gis.content.import_data(sdf, title='pavement_crack_points')
+
+# Visualize the GIS map
+m1 = gis.map('Haryana, India')  # Set the desired location
+m1.basemap.basemap = "satellite"  # Set the basemap
+m1.content.add(cracks_lyr)  # Add the layer with detected cracks
+
+# Apply a renderer to visualize the results
+rend_manager = m1.content.renderer(0)
+smm = rend_manager.smart_mapping()
+smm.class_breaks_renderer(break_type="size", field="count_")
+
+# Display the map
+m
