@@ -1,118 +1,151 @@
+import os
 import torch
 import cv2
-import numpy as np
 import streamlit as st
-from torchvision import transforms
+import numpy as np
 from PIL import Image
+from pathlib import Path
+from torchvision import transforms
 from collections import OrderedDict
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor
+import tempfile
 
-# Streamlit app title and description
-st.title("Custom Model Inference App")
-st.write("Upload an image or video to run inference using your custom PyTorch model.")
+# Streamlit UI
+st.title("Custom Model Inference with YOLOv8 Pipeline")
+st.write("Upload an image or video to run inference with your custom model.")
 
-# Function to load a custom model
+# Initialize GIS API
+api_key = 'YOUR_API_KEY'  # Replace with your API key
+gis = GIS(api_key=api_key)
+
+# Function to load custom model (.pth, .emd, .dpkl)
 @st.cache_resource
-def load_custom_model(model_path, num_classes):
-    """
-    Loads a custom PyTorch model for inference.
-    """
-    class CustomModel(torch.nn.Module):
-        def __init__(self, num_classes):
-            super(CustomModel, self).__init__()
-            from torchvision.models import resnet101  # Replace with your backbone
-            self.base_model = resnet101(pretrained=False)
-            self.base_model.fc = torch.nn.Linear(2048, num_classes)
+def load_custom_model(model_path, num_classes, model_type='pth'):
+    if model_type == 'pth':
+        # Define Model for PyTorch .pth file
+        class CustomModel(torch.nn.Module):
+            def __init__(self, num_classes):
+                super(CustomModel, self).__init__()
+                from torchvision.models import resnet101
+                self.base_model = resnet101(pretrained=False)
+                self.base_model.fc = torch.nn.Linear(2048, num_classes)
 
-        def forward(self, x):
-            return self.base_model(x)
+            def forward(self, x):
+                return self.base_model(x)
 
-    model = CustomModel(num_classes=num_classes)
-    state_dict = torch.load(model_path, map_location=torch.device("cpu"))
+        model = CustomModel(num_classes=num_classes)
+        state_dict = torch.load(model_path, map_location=torch.device('cpu'))
 
-    # Fix keys if necessary
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k.replace("module.", "")  # Remove 'module.' prefix if present
-        new_state_dict[name] = v
+        # Adjust keys if saved with 'module.' prefix
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name = k.replace("module.", "")  # Remove 'module.' prefix
+            new_state_dict[name] = v
 
-    model.load_state_dict(new_state_dict, strict=False)
-    model.eval()  # Set to evaluation mode
+        model.load_state_dict(new_state_dict, strict=False)
+        model.eval()  # Set model to evaluation mode
+
+    elif model_type == 'emd':
+        # Load .emd (ArcGIS) model
+        from arcgis.learn import Model
+        model = Model.from_model_path(model_path)
+
+    elif model_type == 'dpkl':
+        # Load .dpkl (FastAI) model
+        from fastai.learner import load_learner
+        model = load_learner(model_path)
+
+    else:
+        raise ValueError("Unsupported model type. Choose from 'pth', 'emd', or 'dpkl'.")
+    
     return model
 
+# Load Model (Update these variables)
+MODEL_PATH = "model.pth"  # Replace with your model's path
+MODEL_TYPE = 'pth'  # Can be 'pth', 'emd', or 'dpkl'
+NUM_CLASSES = 2  # Update based on your model
+model = load_custom_model(MODEL_PATH, NUM_CLASSES, model_type=MODEL_TYPE)
+st.success("Custom model loaded successfully!")
 
-# Initialize model
-MODEL_PATH = "model.pth"  # Path to your .pth model
-NUM_CLASSES = 2  # Number of output classes (update accordingly)
-model = load_custom_model(MODEL_PATH, NUM_CLASSES)
-st.success("Model loaded successfully!")
-
-
-# Function to preprocess image
+# Preprocessing Function
 def preprocess_image(image):
-    """
-    Preprocesses an image for model inference.
-    """
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize to match input size
+        transforms.Resize((224, 224)),  # Adjust size if needed
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
     return transform(image).unsqueeze(0)  # Add batch dimension
 
-
-# Function to predict on an image
+# Prediction Function
 def predict_image(image, model):
-    """
-    Runs inference on a single image.
-    """
     input_tensor = preprocess_image(image)
     with torch.no_grad():
         outputs = model(input_tensor)
-        probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-    return probabilities
+    return outputs
 
-
-# Upload and process an image
+# Image Inference
 uploaded_image = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "png"])
 if uploaded_image:
     image = Image.open(uploaded_image).convert("RGB")
     st.image(image, caption="Uploaded Image", use_column_width=True)
 
-    # Run inference
     st.write("Running inference...")
-    probabilities = predict_image(image, model)
-    st.write("Predictions (class probabilities):", probabilities.numpy())
+    predictions = predict_image(image, model)
+    st.write("Predictions (raw):", predictions)
 
-# Upload and process a video
+    # Publish to GIS (Example: Upload coordinates for detected objects)
+    if st.button("Publish Results to GIS"):
+        # Assume predictions are bounding boxes; process as needed
+        df = pd.DataFrame({
+            "Sensor Longitude": [0],  # Replace with actual longitude
+            "Sensor Latitude": [0],   # Replace with actual latitude
+            "Prediction": [str(predictions)]  # Replace with actual prediction
+        })
+        sdf = GeoAccessor.from_xy(df, 'Sensor Longitude', 'Sensor Latitude')
+
+        # Create a layer and add to GIS
+        layer = gis.content.import_data(sdf, title="Predictions")
+        st.write(f"Results published to GIS: {layer.title}")
+
+# Video Inference
 uploaded_video = st.file_uploader("Upload a video (mp4/avi)", type=["mp4", "avi"])
 if uploaded_video:
-    # Save uploaded video to a temporary path
-    temp_video_path = "temp_video.mp4"
-    with open(temp_video_path, "wb") as f:
+    video_path = os.path.join(tempfile.gettempdir(), uploaded_video.name)
+    with open(video_path, "wb") as f:
         f.write(uploaded_video.read())
 
-    st.video(temp_video_path)
+    st.video(video_path)
+
     st.write("Running video inference...")
-
-    # Open video with OpenCV
-    cap = cv2.VideoCapture(temp_video_path)
-    frame_count = 0
-
+    cap = cv2.VideoCapture(video_path)
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # Process frame
-        frame_count += 1
+        # Preprocess and predict for each frame
         frame_image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        probabilities = predict_image(frame_image, model)
+        predictions = predict_image(frame_image, model)
+        st.write("Frame predictions (raw):", predictions)
 
-        # Display inference results
-        st.write(f"Frame {frame_count}: Predictions (class probabilities):", probabilities.numpy())
+        # Example for publishing results (coordinates for detected objects)
+        # Process as needed based on your model's output
+        df = pd.DataFrame({
+            "Sensor Longitude": [0],  # Replace with actual longitude
+            "Sensor Latitude": [0],   # Replace with actual latitude
+            "Prediction": [str(predictions)]  # Replace with actual prediction
+        })
+        sdf = GeoAccessor.from_xy(df, 'Sensor Longitude', 'Sensor Latitude')
+
+        # Create a layer and add to GIS
+        layer = gis.content.import_data(sdf, title="Video Predictions")
+        st.write(f"Frame results published to GIS: {layer.title}")
 
     cap.release()
-    st.success("Video inference completed!")
 
-# Conclusion
-st.write("This app uses your custom PyTorch model for inference on images and videos.")
+# Optional: Save the results and export for further use
+if st.button("Export Results"):
+    st.write("Exporting results...")
+    # Add your export logic here
+    # E.g., saving predictions as CSV, uploading to cloud storage, etc.
