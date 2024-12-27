@@ -1,0 +1,72 @@
+from ultralytics import YOLO
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor
+import pandas as pd
+import cv2
+import tempfile
+import os
+import streamlit as st
+
+# Step 1: Initialize GIS
+api_key = "your-api-key"  # Replace with your ArcGIS API key
+gis = GIS(api_key=api_key)
+
+# Step 2: Load YOLOv5 Model
+model = YOLO("yolov5s")  # Use pre-trained YOLOv5 small model (you can replace with your custom-trained model)
+
+# Step 3: Streamlit App for Image/Video Upload and Prediction
+st.title("Road Crack Detection with YOLOv5")
+st.write("Upload an image or video to detect road cracks, and save the results to GIS.")
+
+# Image Upload and Prediction
+uploaded_image = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
+if uploaded_image:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+        tmp_file.write(uploaded_image.read())
+        tmp_file_path = tmp_file.name
+
+    # Predict cracks in the image
+    results = model.predict(tmp_file_path, conf=0.25)  # Confidence threshold
+    annotated_image = results[0].plot()
+
+    # Display annotated image
+    st.image(annotated_image, caption="Detected Cracks", use_column_width=True)
+
+    # Save results to GIS
+    st.write("Saving results to GIS...")
+    detections = []
+    for box in results[0].boxes.xyxy:
+        detections.append({"X": float(box[0]), "Y": float(box[1]), "Class": "Crack"})
+
+    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
+    cracks_layer = gis.content.import_data(sdf, title="Image Crack Detections")
+    st.success("Results uploaded to GIS successfully!")
+    st.write(cracks_layer)
+
+# Video Upload and Prediction
+uploaded_video = st.file_uploader("Upload a video", type=["mp4", "avi"])
+if uploaded_video:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        tmp_file.write(uploaded_video.read())
+        tmp_file_path = tmp_file.name
+
+    # Output video path
+    output_video_path = os.path.join(tempfile.gettempdir(), "output.mp4")
+
+    # Predict cracks in video
+    results = model.predict(source=tmp_file_path, save=True, save_txt=True, conf=0.25)
+
+    # Display processed video
+    st.video(output_video_path)
+
+    # Save detections to GIS
+    st.write("Saving video results to GIS...")
+    detections = []
+    for result in results:
+        for box in result.boxes.xyxy:
+            detections.append({"X": float(box[0]), "Y": float(box[1]), "Class": "Crack"})
+
+    sdf = GeoAccessor.from_xy(pd.DataFrame(detections), "X", "Y")
+    video_layer = gis.content.import_data(sdf, title="Video Crack Detections")
+    st.success("Results uploaded to GIS successfully!")
+    st.write(video_layer)
