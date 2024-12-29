@@ -1,63 +1,53 @@
-import torch
-from torchvision import models, transforms
-from PIL import Image
-import matplotlib.pyplot as plt
+import streamlit as st
+import tempfile
+from arcgis.learn import SingleShotDetector
 
-# Function to load and preprocess the image
-def process_image(image_path):
-    # Define the transformation for the image
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize the image to match model input
-        transforms.ToTensor(),          # Convert image to tensor
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalize
-    ])
+# Assuming `model` is your pre-trained SSD model
+# Assuming `temp_metadata_file` is a valid metadata file path
 
-    # Open the image
-    img = Image.open(image_path)
+st.title("Road Crack Detection Demo")
 
-    # Apply transformations to the image
-    img_tensor = transform(img).unsqueeze(0)  # Add batch dimension (1, C, H, W)
-    return img_tensor
+# Subheader for instructions
+st.subheader("Try Our Demo Model Live")
+st.write("Upload a video to detect cracks in roads")
+st.markdown("----")
 
-# Load the pretrained ResNet50 model
-def load_model():
-    model = models.resnet50(pretrained=True)
-    model.eval()  # Set the model to evaluation mode
-    return model
+# File uploader for video files
+uploaded_video = st.file_uploader("Choose a video file", type=["mp4", "avi", "video"])
 
-# Perform inference on the image using the loaded model
-def predict(model, img_tensor):
-    with torch.no_grad():  # No gradient calculation needed during inference
-        outputs = model(img_tensor)
+if uploaded_video:
+    # Save the uploaded video to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_input_file:
+        temp_input_file.write(uploaded_video.read())
+        temp_input_file_path = temp_input_file.name
 
-    # Get the predicted class index
-    _, predicted_class = torch.max(outputs, 1)
-    return predicted_class.item()
+    # Create a temporary file for the output video
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_output_file:
+        temp_output_file_path = temp_output_file.name
 
-# Display the image and the predicted class
-def display_result(image_path, predicted_class_idx):
-    # Load and display the image
-    img = Image.open(image_path)
-    plt.imshow(img)
-    plt.title(f'Predicted Class Index: {predicted_class_idx}')
-    plt.show()
+    # Predict cracks in the video using the model
+    model.predict_video(
+        input_video_path=temp_input_file_path,
+        metadata_file=temp_metadata_file.name,  # Corrected variable usage
+        visualize=True,
+        output_file_path=temp_output_file_path,  # Save the output video
+        visual_options={
+            'show_scores': True,
+            'show_labels': True,
+            'thickness': 2,
+            'fontface': 0,
+            'color': (255, 255, 255)
+        },
+        resize=True
+    )
 
-# Main function to load model, process image, and make predictions
-def main(image_path):
-    # Load the model
-    model = load_model()
+    # Display the output video
+    st.subheader("Processed Video")
+    st.video(temp_output_file_path, format="video/mp4", start_time=0)
 
-    # Process the image
-    img_tensor = process_image(image_path)
+    # Inform user of temporary file paths (optional debugging)
+    st.write(f"Input video path: {temp_input_file_path}")
+    st.write(f"Output video path: {temp_output_file_path}")
 
-    # Perform prediction
-    predicted_class_idx = predict(model, img_tensor)
-
-    # Display the result
-    display_result(image_path, predicted_class_idx)
-
-# Provide the image path
-image_path = 'path/to/your/image.jpg'  # Replace with the path to your image
-
-# Run the main function
-main(image_path)
+else:
+    st.write("Please upload a video to start the detection process.")
