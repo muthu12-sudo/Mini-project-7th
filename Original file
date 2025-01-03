@@ -1,0 +1,105 @@
+# Install Dependencies
+!pip install arcgis
+!pip install timm==0.6.13
+!pip install dask-expr fastai==1.0.61 opencv-python==4.10.0.84
+
+import pandas as pd
+import os
+import shutil
+from pathlib import Path
+from arcgis.gis import GIS
+from arcgis.features import GeoAccessor
+from arcgis.learn import prepare_data, SingleShotDetector
+
+!python -V
+
+api_key = 'AAPTxy8BH1VEsoebNVZXo8HurDgBfRRmd4zSKA3jsOF2yqzUtsJipRioc2RGxITSiRcUPyWi4DuerLikUXpX31Pu8LIIDYEif41NXLR2576grbgbHw_p0bbBsAzN9a1SYFhtNzh60D-3uj0flpTmdFiD_hQpmxOCqPkx2GcRTxUUf1tfjftz0xg45ULZzMx-ztK2d0pRr7RYINq0TsXtC5NEIDKecyqdYDHBG1FuGhxWc0.AT1_YU503W2a'
+gis = GIS(api_key=api_key)
+
+training_data = gis.content.get('9c7274bbfac343f3aef33f2dc1ff4baf')
+filepaodth = training_data.download(file_name=training_data.name)
+
+import zipfile
+with zipfile.ZipFile(filepath, 'r') as zip_ref:
+    zip_ref.extractall(Path(filepath).parent)
+
+data_path = Path(os.path.join(os.path.splitext(filepath)[0]))
+
+data = prepare_data(data_path, batch_size=8, chip_size=500, seed=42, dataset_type='PASCAL_VOC_rectangles')
+
+!pip install torch==2.5.1 torchvision==0.20.1 fastai==1.0.61
+
+data.classes
+
+data.show_batch(rows=2)
+
+ssd = SingleShotDetector(data, backbone='resnet101', focal_loss=True)
+
+ssd.show_results(thresh=0.2)
+
+lr = ssd.lr_find()
+lr
+
+ssd.fit(30, lr=lr)
+
+ssd.learn.recorder.plot_losses()
+
+ssd.average_precision_score()
+
+all_classes = []
+for i, bb in enumerate(data.train_ds.y):
+    all_classes += bb.data[1].tolist()
+
+df = pd.value_counts(all_classes, sort=False)
+df.index = [data.classes[i] for i in df.index]
+df
+
+ssd.show_results(rows=10, thresh=0.2, nms_overlap=0.5)
+
+ssd.save(str(data_path / 'pavement-cracks-model-resnet101'))
+
+inference_data = gis.content.get('92a75cec191e4dbbb53067761287b977')
+inf_data_path = inference_data.download(file_name=inference_data.name)
+
+with zipfile.ZipFile(inf_data_path, 'r') as zip_ref:
+    zip_ref.extractall(Path(inf_data_path).parent)
+
+img_file = os.path.join(os.path.splitext(inf_data_path)[0], 'test_img.jpg')
+video_file = os.path.join(os.path.splitext(inf_data_path)[0], 'test_video.mp4')
+metadata_file = os.path.join(os.path.splitext(inf_data_path)[0], 'metadata.csv')
+
+bbox_data = ssd.predict(img_file, threshold=0.1, visualize=True)
+
+ssd.predict_video(input_video_path=video_file, metadata_file=metadata_file, visualize=True, resize=True)
+
+df = pd.read_csv(metadata_file)
+
+df.vmtilocaldataset = df.vmtilocaldataset.str.strip()
+df.loc[df.vmtilocaldataset == '', 'vmtilocaldataset'] = ''
+df['count'] = (df['vmtilocaldataset'].str.split(';').str.len().fillna(1) - 1)
+
+fps = 60
+a = (pd.Series(df.index.values) / fps)
+a = (a - .49).round().abs()
+df['group'] = a
+
+max_detection_idxes = df[['group', 'count']].groupby('group').idxmax()['count'].values
+df_flt = df.iloc[max_detection_idxes]
+
+df_flt.drop(df_flt.loc[df['count'] == 0].index, inplace=True)
+
+sdf = GeoAccessor.from_xy(df_flt, 'Sensor Longitude', 'Sensor Latitude')
+
+cracks_lyr = gis.content.import_data(sdf, title='crack points')
+
+m1 = gis.map('Haryana, India')
+m1.basemap.basemap = "satellite"
+m1.content.add(cracks_lyr)
+
+rend_manager = m1.content.renderer(0)
+smm = rend_manager.smart_mapping()
+smm.class_breaks_renderer(break_type="size", field="count_")
+
+
+
+Explain this to me with its outputs
