@@ -1,0 +1,75 @@
+# Install Dependencies
+!pip install arcgis timm==0.6.13 dask-expr fastai==1.0.61 opencv-python==4.10.0.84 tqdm
+
+import pandas as pd
+import os
+import zipfile
+from pathlib import Path
+from tqdm import tqdm
+from arcgis.gis import GIS
+from arcgis.learn import prepare_data, SingleShotDetector
+
+# Authenticate GIS
+api_key = 'YOUR_API_KEY'  # Replace with your API key
+gis = GIS(api_key=api_key)
+
+# Download and Prepare Data
+training_data = gis.content.get('9c7274bbfac343f3aef33f2dc1ff4baf')
+filepath = training_data.download(file_name=training_data.name)
+
+# Extract training data
+with zipfile.ZipFile(filepath, 'r') as zip_ref:
+    zip_ref.extractall(Path(filepath).parent)
+
+data_path = Path(os.path.splitext(filepath)[0])
+
+# Prepare the data
+data = prepare_data(data_path, batch_size=8, chip_size=500, seed=42, dataset_type='PASCAL_VOC_rectangles')
+
+# Define Model
+ssd = SingleShotDetector(data, backbone='resnet101', focal_loss=True)
+
+# Batch-by-Batch Training
+num_epochs = 30
+train_dl = data.train_dl  # Training data loader
+learner = ssd.learn       # Access Learner object
+
+for epoch in range(num_epochs):
+    print(f"Epoch {epoch + 1}/{num_epochs}")
+    learner.model.train()  # Set model to training mode
+    total_loss = 0
+    
+    for i, (xb, yb) in enumerate(tqdm(train_dl)):
+        # Forward pass
+        loss = learner.loss_func(learner.model(xb), yb)
+        
+        # Backward pass and optimization
+        loss.backward()
+        learner.opt.step()
+        learner.opt.zero_grad()
+        
+        # Accumulate loss
+        total_loss += loss.item()
+    
+    # Calculate and print average loss
+    avg_loss = total_loss / len(train_dl)
+    print(f"Average Loss for Epoch {epoch + 1}: {avg_loss}")
+    
+    # Validate after each epoch (optional)
+    validation_loss = learner.validate()
+    print(f"Validation Loss for Epoch {epoch + 1}: {validation_loss}")
+    
+    # Save model after each epoch
+    ssd.save(f'pavement-cracks-model-epoch-{epoch + 1}')
+
+# Save Final Model
+ssd.save('pavement-cracks-model-final')
+print("Training completed and model saved.")
+
+# Predict and Evaluate on a Test Image
+img_file = os.path.join(data_path, 'test_img.jpg')  # Replace with your test image path
+bbox_data = ssd.predict(img_file, threshold=0.1, visualize=True)
+
+# Display Results
+print("Bounding Box Data:", bbox_data)
+ssd.show_results(rows=1, thresh=0.1)
